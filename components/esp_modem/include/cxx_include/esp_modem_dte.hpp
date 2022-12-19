@@ -53,6 +53,8 @@ public:
      */
     int write(uint8_t *data, size_t len) override;
 
+    int write_cmd(uint8_t *data, size_t len);
+
     /**
      * @brief Reading from the underlying terminal
      * @param d Returning the data pointer of the received payload

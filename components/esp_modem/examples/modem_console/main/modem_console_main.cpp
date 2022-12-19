@@ -65,6 +65,12 @@ using namespace esp_modem;
 static SignalGroup exit_signal;
 
 
+command_result handle_urc(uint8_t *data, size_t len)
+{
+    ESP_LOG_BUFFER_HEXDUMP("on_read", data, len, ESP_LOG_INFO);
+    return command_result::TIMEOUT;
+}
+
 void config_gpio(void)
 {
     gpio_config_t io_conf = {};                     //zero-initialize the config structure.
@@ -286,8 +292,9 @@ extern "C" void app_main(void)
 
     const ConsoleCommand GetOperatorName("get_operator_name", "reads the operator name", no_args, [&](ConsoleCommand * c) {
         std::string operator_name;
+        int act;
         ESP_LOGI(TAG, "Reading operator name...");
-        CHECK_ERR(dce->get_operator_name(operator_name), ESP_LOGI(TAG, "OK. Operator name: %s", operator_name.c_str()));
+        CHECK_ERR(dce->get_operator_name(operator_name, act), ESP_LOGI(TAG, "OK. Operator name: %s", operator_name.c_str()));
     });
 
     const struct GenericCommandArgs {
@@ -339,6 +346,18 @@ extern "C" void app_main(void)
         ESP_LOGI(TAG, "Resetting the module...");
         CHECK_ERR(dce->reset(), ESP_LOGI(TAG, "OK"));
     });
+    const ConsoleCommand HandleURC("urc", "toggle urc handling", no_args, [&](ConsoleCommand * c) {
+        static int cnt = 0;
+        if (++cnt % 2) {
+            ESP_LOGI(TAG, "Adding URC handler");
+            dce->set_on_read(handle_urc);
+        } else {
+            ESP_LOGI(TAG, "URC removed");
+            dce->set_on_read(nullptr);
+        }
+        return 0;
+    });
+
     const struct SetApn {
         SetApn(): apn(STR1, nullptr, nullptr, "<apn>", "APN (Access Point Name)") {}
         CommandArgs apn;

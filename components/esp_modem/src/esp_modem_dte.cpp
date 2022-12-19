@@ -192,6 +192,11 @@ int DTE::write(uint8_t *data, size_t len)
     return secondary_term->write(data, len);
 }
 
+int DTE::write_cmd(uint8_t *data, size_t len)
+{
+    return command_term->write(data, len);
+}
+
 void DTE::on_read(got_line_cb on_read_cb)
 {
     if (on_read_cb == nullptr) {
