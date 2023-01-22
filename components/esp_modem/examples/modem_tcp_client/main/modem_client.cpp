@@ -17,7 +17,8 @@
 #include "sock_dce.hpp"
 #include "esp_log.h"
 
-#define BROKER_URL "mqtt://mqtt.eclipseprojects.io"
+#define BROKER_HOST "test.mosquitto.org"
+#define BROKER_PORT 1883
 
 static const char *TAG = "modem_client";
 static EventGroupHandle_t event_group = NULL;
@@ -108,19 +109,20 @@ extern "C" void app_main(void)
         return;
     }
 
-    dce->init(1883);
+    dce->init(BROKER_PORT);
     esp_mqtt_client_config_t mqtt_config = {};
+    std::string uri = "mqtt://127.0.0.1:" + std::to_string(BROKER_PORT);
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-    mqtt_config.broker.address.uri = "mqtt://127.0.0.1";
+    mqtt_config.broker.address.uri = uri.c_str();
     mqtt_config.session.message_retransmit_timeout = 10000;
 #else
-    mqtt_config.uri = "mqtt://127.0.0.1";
+    mqtt_config.uri = uri.c_str();
     mqtt_config.message_retransmit_timeout = 10000;
 #endif
     esp_mqtt_client_handle_t mqtt_client = esp_mqtt_client_init(&mqtt_config);
     esp_mqtt_client_register_event(mqtt_client, static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID), mqtt_event_handler, NULL);
     esp_mqtt_client_start(mqtt_client);
-    if (!dce->start("test.mosquitto.org", 1883)) {
+    if (!dce->start(BROKER_HOST, BROKER_PORT)) {
         ESP_LOGE(TAG, "Failed to start DCE");
         return;
     }
@@ -134,9 +136,8 @@ extern "C" void app_main(void)
             ESP_LOGE(TAG, "Failed to reinit network");
             return;
         }
-        if (!dce->start("test.mosquitto.org", 1883)) {
+        if (!dce->start(BROKER_HOST, BROKER_PORT)) {
             ESP_LOGI(TAG, "Network reinitialized, retrying");
         }
     }
-
 }

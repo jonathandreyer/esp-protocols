@@ -57,6 +57,7 @@ private:
         CONNECTION_FAILED,
         SENDING,
         SENDING_1,
+        SENDING_2,
         SENDING_FAILED,
         RECEIVING,
         RECEIVING_FAILED

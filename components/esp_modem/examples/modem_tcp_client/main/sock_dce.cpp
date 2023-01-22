@@ -93,7 +93,7 @@ bool DCE::perform()
         }
         ESP_LOG_BUFFER_HEXDUMP(TAG, &buffer[0], len, ESP_LOG_VERBOSE);
         data_to_send = len;
-        send_cmd("AT+CIPSEND=0," + std::to_string(len) + "\r");
+        send_cmd("AT+QISEND=0," + std::to_string(len) + "\r");
     }
     if (FD_ISSET(data_ready_fd, &fdset)) {
         uint64_t data;
@@ -110,7 +110,7 @@ bool DCE::perform()
             return false;
         }
         state = status::RECEIVING;
-        send_cmd("AT+CIPRXGET=2,0," + std::to_string(size) + "\r");
+        send_cmd("AT+QIRD=0," + std::to_string(size) + "\r");
     }
     return true;
 }
@@ -133,33 +133,27 @@ void DCE::forwarding(uint8_t *data, size_t len)
             return;
         }
         data_to_send = 0;
-        uint8_t ctrl_z = '\x1A';
-        dte->write(&ctrl_z, 1);
         state = status::SENDING_1;
         return;
     } else if (state == status::RECEIVING) {
         const size_t MIN_MESSAGE = 6;
-        const std::string_view head = "+CIPRXGET: 2,0,";
+        const std::string_view head = "+QIRD: ";
         auto head_pos = (char *)std::search(data, data+len, head.begin(), head.end());
         if (head_pos == nullptr) {
             state = status::RECEIVING_FAILED;
             signal.set(IDLE);
             return;
         }
-        if (head_pos - (char*)data > MIN_MESSAGE) {
-            // check for async replies before the Recv header
-            std::string_view response((char*)data, head_pos - (char*)data);
-            check_async_replies(response);
-        }
 
-        auto next_comma = (char *)memchr(head_pos + head.size(), ',', MIN_MESSAGE);
-        if (next_comma == nullptr)  {
+        auto next_nl = (char*)memchr(head_pos + head.size(), '\n', MIN_MESSAGE);
+        if (next_nl == nullptr) {
             state = status::RECEIVING_FAILED;
             signal.set(IDLE);
             return;
         }
+
         size_t actual_len;
-        if (std::from_chars(head_pos + head.size(), next_comma, actual_len).ec == std::errc::invalid_argument) {
+        if (std::from_chars(head_pos + head.size(), next_nl, actual_len).ec == std::errc::invalid_argument) {
             ESP_LOGE(TAG, "cannot convert");
             state = status::RECEIVING_FAILED;
             signal.set(IDLE);
@@ -167,14 +161,14 @@ void DCE::forwarding(uint8_t *data, size_t len)
         }
 
         ESP_LOGD(TAG, "Received: actual len=%d", actual_len);
-
-        auto next_nl = (char*)memchr(next_comma, '\n', MIN_MESSAGE);
-        if (next_nl == nullptr) {
-            ESP_LOGE(TAG, "not found");
-            state = status::RECEIVING_FAILED;
+        if (actual_len == 0) {
+            ESP_LOGD(TAG, "no data received");
+            state = status::IDLE;
             signal.set(IDLE);
             return;
         }
+
+        // TODO improve : compare *actual_len* & data size (to be sure that received data is equal to *actual_len*)
         if (actual_len > size) {
             ESP_LOGE(TAG, "TOO BIG");
             state = status::RECEIVING_FAILED;
@@ -202,8 +196,13 @@ void DCE::forwarding(uint8_t *data, size_t len)
     check_async_replies(response);
     // Notification about Data Ready could come any time
     if (state == status::SENDING_1) {
-        if (response.find("+CIPSEND:") != std::string::npos) {
-            state = status::IDLE;
+        if (response.find("SEND OK") != std::string::npos) {
+            send_cmd("AT+QISEND=0,0\r");
+            state = status::SENDING_2;
+            return;
+        } else if (response.find("SEND FAIL") != std::string::npos) {
+            ESP_LOGE(TAG, "Sending buffer full");
+            state = status::SENDING_FAILED;
             signal.set(IDLE);
             return;
         } else if (response.find("ERROR") != std::string::npos) {
@@ -213,8 +212,60 @@ void DCE::forwarding(uint8_t *data, size_t len)
             return;
         }
     }
+    if (state == status::SENDING_2) {
+        constexpr std::string_view head = "+QISEND: ";
+        if (response.find(head) != std::string::npos) {
+            // Parsing +QISEND: <total_send_length>,<ackedbytes>,<unackedbytes>
+            size_t head_pos = response.find(head);
+            response = response.substr(head_pos + head.size());
+            int pos, property = 0;
+            int total = 0, ack = 0, unack = 0;
+            while ((pos = response.find(',')) != std::string::npos) {
+                auto next_comma = (char *)memchr(response.data(), ',', response.size());
+
+                // extract value
+                size_t value;
+                if (std::from_chars(response.data(), next_comma, value).ec == std::errc::invalid_argument) {
+                    ESP_LOGE(TAG, "cannot convert");
+                    state = status::SENDING_FAILED;
+                    signal.set(IDLE);
+                    return;
+                }
+
+                switch (property++) {
+                case 0: total = value;
+                    break;
+                case 1: ack = value;
+                    break;
+                default:
+                    state = status::SENDING_FAILED;
+                    signal.set(IDLE);
+                    return;
+                }
+                response = response.substr(pos + 1);
+            }
+            if (std::from_chars(response.data(), response.data() + pos, unack).ec == std::errc::invalid_argument) {
+                state = status::SENDING_FAILED;
+                signal.set(IDLE);
+                return;
+            }
+
+            // TODO improve : need check *total* & *ack* values, or loop (every 5 sec) with 90s or 120s timeout
+            if (ack < total) {
+                ESP_LOGE(TAG, "all sending data are not ack (missing %d bytes acked)", (total - ack));
+            }
+            state = status::IDLE;
+            signal.set(IDLE);
+            return;
+        } else if (response.find("ERROR") != std::string::npos) {
+            ESP_LOGE(TAG, "Failed to check sending");
+            state = status::SENDING_FAILED;
+            signal.set(IDLE);
+            return;
+        }
+    }
     if (state == status::CONNECTING) {
-        if (response.find("+CIPOPEN: 0,0") != std::string::npos) {
+        if (response.find("+QIOPEN: 0,0") != std::string::npos) {
             ESP_LOGI(TAG, "Connected!");
             state = status::IDLE;
             signal.set(IDLE);
@@ -234,6 +285,15 @@ void DCE::close_sock()
     if (sock > 0) {
         close(sock);
         sock = -1;
+    }
+    const int retries = 5;
+    int i = 0;
+    while (net_close() != esp_modem::command_result::OK) {
+        if (i++ > retries) {
+            ESP_LOGE(TAG, "Failed to close network");
+            return;
+        }
+        esp_modem::Task::Delay(1000);
     }
 }
 
@@ -264,19 +324,18 @@ void DCE::init(int port)
         ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
         return;
     }
-    ESP_LOGI(TAG, "Socket bound, port %d", 1883);
+    ESP_LOGI(TAG, "Socket bound, port %d", port);
     err = listen(listen_sock, 1);
     if (err != 0) {
         ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
         return;
     }
-
 }
 
 void DCE::check_async_replies(std::string_view &response) const
 {
     ESP_LOGD(TAG, "response %.*s", static_cast<int>(response.size()), response.data());
-    if (response.find("+CIPRXGET: 1") != std::string::npos) {
+    if (response.find("+QIURC: \"recv\",0") != std::string::npos) {
         uint64_t data_ready = 1;
         write(data_ready_fd, &data_ready, sizeof(data_ready));
         ESP_LOGD(TAG, "Got data on modem!");
@@ -288,15 +347,11 @@ bool DCE::start(std::string host, int port)
 {
     dte->on_read(nullptr);
     tcp_close();
-    if (set_rx_mode(1) != esp_modem::command_result::OK) {
-        ESP_LOGE(TAG, "Unable to set Rx mode");
-        return false;
-    }
     dte->on_read([this](uint8_t *data, size_t len) {
         this->forwarding(data, len);
         return esp_modem::command_result::TIMEOUT;
     });
-    send_cmd(R"(AT+CIPOPEN=0,"TCP",")" + host + "\"," + std::to_string(port) + "\r");
+    send_cmd(R"(AT+QIOPEN=1,0,"TCP",")" + host + "\"," + std::to_string(port) + "\r");
     state = status::CONNECTING;
     return true;
 }
